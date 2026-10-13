@@ -465,6 +465,20 @@ button[data-testid="stMainMenuButton"] { display: none; }
 
 def main_app():
     st.set_page_config(page_title="康养社区智能助手", page_icon="🤖", layout="wide")
+
+    # 仅隐藏云端注入的额外按钮（Star/Fork 等）与右下角 Manage app，保留“设置”和 ⋮ 菜单
+    st.markdown(
+        """
+<style>
+/* 云端平台注入的操作按钮（Star/Edit/Fork 等），不影响“设置”和主菜单 */
+[data-testid="stToolbarActions"] { display: none; }
+/* 右下角 Manage app 按钮（本地对应运行状态条） */
+[data-testid="stStatusWidget"] { display: none; }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
     display_name = st.session_state["display_name"]
     user_id = st.session_state["username"]
 
