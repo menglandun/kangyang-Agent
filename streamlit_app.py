@@ -634,7 +634,7 @@ FLASH_CSS = """
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
     z-index: 1000000;
     pointer-events: none;
-    animation: flash-toast-out 0.8s ease 3s forwards;
+    animation: flash-toast-out 0.5s ease 1.5s forwards;
 }
 .flash-toast.flash-red { background: #dc2626; }
 @keyframes flash-toast-out {
