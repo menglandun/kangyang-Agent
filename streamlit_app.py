@@ -27,6 +27,60 @@ try:
 except Exception:  # 缺少 crewai 等依赖时不影响主应用启动
     run_conversion_assistant = None
 
+# ============ 银发智脑 · 爆款选题分析（第2批） ============
+try:
+    from yinfa_zhinao_topic import run_topic_analysis
+except Exception:  # 缺少 crewai 等依赖时不影响主应用启动
+    run_topic_analysis = None
+
+# ============ 银发智脑 · 运营工具集（第3批） ============
+try:
+    from yinfa_zhinao_checkin import run_checkin_plan
+except Exception:  # 缺少 crewai 等依赖时不影响主应用启动
+    run_checkin_plan = None
+try:
+    from yinfa_zhinao_event import run_event_plan
+except Exception:
+    run_event_plan = None
+try:
+    from yinfa_zhinao_referral import run_referral_copy
+except Exception:
+    run_referral_copy = None
+try:
+    from yinfa_zhinao_faq import run_faq_answers
+except Exception:
+    run_faq_answers = None
+try:
+    from yinfa_zhinao_grading import run_grading
+except Exception:
+    run_grading = None
+try:
+    from yinfa_zhinao_renewal import run_renewal_analysis
+except Exception:
+    run_renewal_analysis = None
+try:
+    from yinfa_zhinao_curriculum import run_curriculum
+except Exception:
+    run_curriculum = None
+
+# 运营工具注册表：侧栏入口、生成任务与结果展示都由它驱动
+TOOL_FEATURES = [
+    {"key": "checkin", "emoji": "📅", "title": "每周打卡主题", "group": "内容运营",
+     "caption": "按周信息生成 7 天打卡主题与引导话术，约需 1 分钟。", "func": run_checkin_plan},
+    {"key": "event", "emoji": "🎉", "title": "节日活动策划", "group": "内容运营",
+     "caption": "生成完整活动方案（主题 / 流程 / 文案 / 互动 / 奖品 / 收尾），约需 1 分钟。", "func": run_event_plan},
+    {"key": "referral", "emoji": "🤝", "title": "转介绍话术", "group": "内容运营",
+     "caption": "生成老带新朋友圈文案（像学员自己发的），约需 1 分钟。", "func": run_referral_copy},
+    {"key": "faq", "emoji": "💬", "title": "FAQ自动应答", "group": "学员服务",
+     "caption": "常见问题批量生成可直接发送的回答，约需 1 分钟。", "func": run_faq_answers},
+    {"key": "grading", "emoji": "✍️", "title": "作业批改", "group": "学员服务",
+     "caption": "批改示例作业：先夸、提建议、给分数，约需 1 分钟。", "func": run_grading},
+    {"key": "renewal", "emoji": "🚨", "title": "续费预警与挽留", "group": "学员服务",
+     "caption": "识别流失信号并生成挽留话术，约需 1 分钟。", "func": run_renewal_analysis},
+    {"key": "curriculum", "emoji": "📚", "title": "课程大纲生成", "group": "教务支持",
+     "caption": "生成完整课程大纲与知识点拆解，约需 1-2 分钟。", "func": run_curriculum},
+]
+
 APP_DIR = Path(__file__).resolve().parent
 EDU_DB = APP_DIR / "yinfa_edu.db"
 CHECKPOINT_DB = APP_DIR / "checkpoints.db"
@@ -36,7 +90,10 @@ BOT_AVATAR_PATH = APP_DIR / "robot_avatar.png"
 def _code_fingerprint() -> str:
     """源码内容指纹：代码/工具更新后自动让 get_app 缓存失效，无需手动改常量。"""
     digest = hashlib.sha256()
-    for name in ("streamlit_app.py", "yinfa_zhinao.py"):
+    for name in ("streamlit_app.py", "yinfa_zhinao.py", "yinfa_zhinao_topic.py",
+                 "yinfa_zhinao_checkin.py", "yinfa_zhinao_event.py", "yinfa_zhinao_referral.py",
+                 "yinfa_zhinao_faq.py", "yinfa_zhinao_grading.py", "yinfa_zhinao_renewal.py",
+                 "yinfa_zhinao_curriculum.py", "yinfa_zhinao_llm.py"):
         try:
             digest.update((APP_DIR / name).read_bytes())
         except OSError:
@@ -279,8 +336,12 @@ def login_page():
 
 def logout():
     for key in ["authenticated", "username", "display_name", "chat_history",
-                "yinfa_result", "yinfa_requested", "pending_prompt"]:
+                "yinfa_result", "yinfa_requested",
+                "topic_result", "topic_requested", "pending_prompt"]:
         st.session_state.pop(key, None)
+    for feature in TOOL_FEATURES:
+        st.session_state.pop(f"{feature['key']}_result", None)
+        st.session_state.pop(f"{feature['key']}_requested", None)
     st.rerun()
 
 # ============ 主界面 ============
@@ -333,6 +394,11 @@ def resume_lock(thread_id: str) -> threading.Lock:
 
 # 同一时刻只允许一个转化方案生成任务，避免多用户并发调用 crewai 时资源竞争
 _yinfa_generation_lock = threading.Lock()
+# 同一时刻只允许一个选题清单生成任务（与转化方案互不影响）
+_topic_generation_lock = threading.Lock()
+# 每个运营工具各自一把生成锁：同一工具不允许并发生成（防结果互相覆盖），
+# 不同工具之间允许并行执行（多用户同时点不同工具时互不阻塞）
+_tool_generation_locks = {feature["key"]: threading.Lock() for feature in TOOL_FEATURES}
 
 
 AVATAR_FONT_CANDIDATES = [
@@ -489,14 +555,19 @@ button[data-testid="stMainMenuButton"] { display: none; }
 def main_app():
     st.set_page_config(page_title="银发智脑・兴趣教育智慧中台", page_icon="🤖", layout="wide")
 
-    # 仅隐藏云端注入的额外按钮（Star/Fork 等）与右下角 Manage app，保留“设置”和 ⋮ 菜单
+    # 隐藏云端注入按钮、右下角 Manage app，以及原生右上角主菜单（⋮）
     st.markdown(
         """
 <style>
-/* 云端平台注入的操作按钮（Star/Edit/Fork 等），不影响“设置”和主菜单 */
+/* 云端平台注入的操作按钮（Star/Edit/Fork 等） */
 [data-testid="stToolbarActions"] { display: none; }
 /* 右下角 Manage app 按钮（本地对应运行状态条） */
 [data-testid="stStatusWidget"] { display: none; }
+/* 原生右上角主菜单（⋮）：隐藏，改用自定义「我的」菜单 */
+button[data-testid="stMainMenuButton"] { display: none; }
+/* 自定义「我的」菜单：固定在右上角 */
+.st-key-me-menu { position: fixed; top: 0.75rem; right: 1.1rem; z-index: 1000000; width: auto; }
+.st-key-me-menu button { width: auto; }
 </style>
 """,
         unsafe_allow_html=True,
@@ -504,16 +575,27 @@ def main_app():
 
     display_name = st.session_state["display_name"]
     user_id = st.session_state["username"]
+    user_avatar = name_avatar(display_name, "#3B82F6")
 
     st.markdown(APP_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="kangyang-welcome">欢迎来到兴趣教育家园</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kangyang-welcome">欢迎来到兴趣教育智慧家园</div>', unsafe_allow_html=True)
+
+    # 右上角「我的」菜单（替代原生 ⋮）：账户信息 + 退出登录
+    with st.container(key="me-menu"):
+        with st.popover("我的", icon="🤖"):
+            st.image(user_avatar, width=56)
+            st.markdown(f"**{display_name}**　@{user_id}")
+            st.caption("兴趣教育智慧中台 · 运营工作台")
+            st.divider()
+            if st.button("🚪 退出登录", key="logout-btn", use_container_width=True):
+                logout()
+
     st.caption(f"当前登录：{display_name}（@{user_id}）")
-    st.caption("工作流：获客 → 转化 → 交付 → 运营 → 留存 ｜ 第1批已上线：体验课7天转化助手（学员画像 · 社群话术 · 作业点评 · 转化建议）")
+    st.caption("工作流：获客 → 转化 → 交付 → 运营 → 留存 ｜ 已上线 9 个智能体工具：转化助手 · 选题分析 · 打卡主题 · 活动策划 · 转介绍 · FAQ · 作业批改 · 续费预警 · 课程大纲")
 
     app, checkpointer = get_app(APP_BUILD)
     config = {"configurable": {"thread_id": user_id}}
 
-    user_avatar = name_avatar(display_name, "#3B82F6")
     bot_avatar = bot_avatar_bytes()
 
     snapshot = app.get_state(config)
@@ -522,6 +604,18 @@ def main_app():
     def queue_prompt(text: str):
         st.session_state["pending_prompt"] = text
         st.rerun()
+
+    def render_tool_popovers(group: str):
+        for feature in TOOL_FEATURES:
+            if feature["group"] != group:
+                continue
+            with st.popover(f"{feature['emoji']} {feature['title']}", disabled=pending, use_container_width=True):
+                st.caption(feature["caption"])
+                if feature["func"] is None:
+                    st.caption("当前环境未安装 crewai，功能暂不可用")
+                elif st.button(f"🚀 生成{feature['title']}", key=f"{feature['key']}-run", type="primary", use_container_width=True):
+                    st.session_state[f"{feature['key']}_requested"] = True
+                    st.rerun()
 
     with st.sidebar:
         st.markdown('<div class="kangyang-sidebar-title">🤖 银发智脑・兴趣教育智慧中台</div>', unsafe_allow_html=True)
@@ -560,9 +654,20 @@ def main_app():
             elif st.button("🚀 生成今日转化方案", key="yinfa-run", type="primary", use_container_width=True):
                 st.session_state["yinfa_requested"] = True
                 st.rerun()
+        st.markdown("**内容运营**")
+        with st.popover("🔥 爆款选题分析", disabled=pending, use_container_width=True):
+            st.caption("示例数据：同类账号近期爆款参考。2个智能体依次生成：爆款规律 + 本周10个选题 → 标题与钩子优化，约需 1-2 分钟。")
+            if run_topic_analysis is None:
+                st.caption("当前环境未安装 crewai，功能暂不可用")
+            elif st.button("🚀 生成本周选题清单", key="topic-run", type="primary", use_container_width=True):
+                st.session_state["topic_requested"] = True
+                st.rerun()
+        render_tool_popovers("内容运营")
+        st.markdown("**学员服务**")
+        render_tool_popovers("学员服务")
+        st.markdown("**教务支持**")
+        render_tool_popovers("教务支持")
         st.markdown('<div class="sidebar-bottom-anchor"></div>', unsafe_allow_html=True)
-        if st.button("🚪 退出登录"):
-            logout()
 
     # 对话历史（会话内没有历史时，从该线程的 checkpoint 重建）
     if "chat_history" not in st.session_state:
@@ -637,6 +742,62 @@ def main_app():
         st.caption("示例学员：张阿姨（62岁 · 书法体验课 · 第5天/共7天）")
         for section_name, section_text in yinfa_result.items():
             with st.expander(section_name, expanded=(section_name == "转化建议")):
+                st.markdown(section_text or "（暂无输出）")
+
+    # 爆款选题分析（第2批）：按需生成，结果保留在会话里
+    if st.session_state.pop("topic_requested", False):
+        if run_topic_analysis is None:
+            st.error("当前环境缺少 crewai 依赖，无法生成选题清单。")
+        elif not _topic_generation_lock.acquire(blocking=False):
+            st.warning("已有生成任务正在进行，请稍后再试。")
+        else:
+            try:
+                with st.spinner("银发智脑正在生成本周选题清单（2个智能体依次工作，约需 1-2 分钟）..."):
+                    st.session_state["topic_result"] = run_topic_analysis()
+            except Exception:
+                logger.exception("选题清单生成失败")
+                st.session_state.pop("topic_result", None)
+                st.error("选题清单生成失败，请稍后重试。")
+            finally:
+                _topic_generation_lock.release()
+
+    # 运营工具集：按需生成，结果保留在会话里
+    for _feature in TOOL_FEATURES:
+        if not st.session_state.pop(f"{_feature['key']}_requested", False):
+            continue
+        if _feature["func"] is None:
+            st.error(f"当前环境缺少 crewai 依赖，无法生成{_feature['title']}。")
+        elif not _tool_generation_locks[_feature["key"]].acquire(blocking=False):
+            st.warning("已有生成任务正在进行，请稍后再试。")
+        else:
+            try:
+                with st.spinner(f"银发智脑正在生成{_feature['title']}（约需 1 分钟）..."):
+                    st.session_state[f"{_feature['key']}_result"] = _feature["func"]()
+            except Exception:
+                logger.exception(f"{_feature['title']}生成失败")
+                st.session_state.pop(f"{_feature['key']}_result", None)
+                st.error(f"{_feature['title']}生成失败，请稍后重试。")
+            finally:
+                _tool_generation_locks[_feature["key"]].release()
+
+    topic_result = st.session_state.get("topic_result")
+    if topic_result:
+        st.divider()
+        st.subheader("🔥 爆款选题分析 · 本周选题清单")
+        st.caption("2个智能体：选题分析 → 文案优化")
+        for section_name, section_text in topic_result.items():
+            with st.expander(section_name, expanded=(section_name == "爆款规律与选题清单")):
+                st.markdown(section_text or "（暂无输出）")
+
+    # 运营工具集结果展示
+    for _feature in TOOL_FEATURES:
+        _result = st.session_state.get(f"{_feature['key']}_result")
+        if not _result:
+            continue
+        st.divider()
+        st.subheader(f"{_feature['emoji']} {_feature['title']} · 生成结果")
+        for section_name, section_text in _result.items():
+            with st.expander(section_name, expanded=True):
                 st.markdown(section_text or "（暂无输出）")
 
     # 输入（待审批解决前不接受新的普通输入；侧栏快捷功能通过 pending_prompt 注入）
