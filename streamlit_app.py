@@ -66,7 +66,7 @@ def init_business_db():
     c.execute("""CREATE TABLE IF NOT EXISTS activities(
         date TEXT, time TEXT, name TEXT, location TEXT, participants TEXT)""")
 
-    # 种子数据
+    # 种子数据：老人/员工只在首次建库时写入
     c.execute("SELECT COUNT(*) FROM residents")
     if c.fetchone()[0] == 0:
         residents = [
@@ -85,7 +85,10 @@ def init_business_db():
         ]
         c.executemany("INSERT INTO staff VALUES(?,?,?,?)", staff)
 
-        today = date.today().isoformat()
+    # 排班/活动按天补齐：每天首次运行写入当天数据，避免隔天查询为空
+    today = date.today().isoformat()
+    c.execute("SELECT COUNT(*) FROM schedule WHERE date=?", (today,))
+    if c.fetchone()[0] == 0:
         schedule = [
             (today, "S001", "白班 8:00-16:00", "3楼"),
             (today, "S002", "白班 8:00-16:00", "3楼"),
@@ -94,6 +97,8 @@ def init_business_db():
         ]
         c.executemany("INSERT INTO schedule VALUES(?,?,?,?)", schedule)
 
+    c.execute("SELECT COUNT(*) FROM activities WHERE date=?", (today,))
+    if c.fetchone()[0] == 0:
         activities = [
             (today, "09:30", "晨间太极", "一楼花园", "自理老人约20人"),
             (today, "14:00", "手工书法", "二楼活动室", "王秀兰、赵德明"),
@@ -244,8 +249,8 @@ def verify_user(username: str, password: str) -> bool:
         return False
 
 def login_page():
-    st.set_page_config(page_title="登录 - 康养社区智能助手", page_icon="🔐")
-    st.title("🔐 康养社区智能助手")
+    st.set_page_config(page_title="登录 - 银发智脑・兴趣教育智慧中台", page_icon="🔐")
+    st.title("🔐 银发智脑・兴趣教育智慧中台")
     st.markdown("护理部日常问答 · 档案查询 · 排班活动 · 通知审批")
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown(LOGIN_HIDE_TOOLBAR_CSS, unsafe_allow_html=True)
@@ -389,7 +394,7 @@ def resident_names() -> list:
 APP_CSS = """
 <style>
 .kangyang-sidebar-title {
-    font-size: 1.25rem;
+    font-size: 1.1rem;
     font-weight: 700;
     line-height: 1.4;
     margin: 0;
@@ -464,7 +469,7 @@ button[data-testid="stMainMenuButton"] { display: none; }
 """
 
 def main_app():
-    st.set_page_config(page_title="康养社区智能助手", page_icon="🤖", layout="wide")
+    st.set_page_config(page_title="银发智脑・兴趣教育智慧中台", page_icon="🤖", layout="wide")
 
     # 仅隐藏云端注入的额外按钮（Star/Fork 等）与右下角 Manage app，保留“设置”和 ⋮ 菜单
     st.markdown(
@@ -483,7 +488,7 @@ def main_app():
     user_id = st.session_state["username"]
 
     st.markdown(APP_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="kangyang-welcome">欢迎来到康养社区家园</div>', unsafe_allow_html=True)
+    st.markdown('<div class="kangyang-welcome">欢迎来到兴趣教育家园</div>', unsafe_allow_html=True)
     st.caption(f"当前登录：{display_name}（@{user_id}）")
 
     app, checkpointer = get_app()
@@ -500,7 +505,7 @@ def main_app():
         st.rerun()
 
     with st.sidebar:
-        st.markdown('<div class="kangyang-sidebar-title">🤖 康养社区智能助手</div>', unsafe_allow_html=True)
+        st.markdown('<div class="kangyang-sidebar-title">🤖 银发智脑・兴趣教育智慧中台</div>', unsafe_allow_html=True)
         st.divider()
         if st.button("🆕 新建对话", use_container_width=True):
             if clear_thread(checkpointer, user_id):
