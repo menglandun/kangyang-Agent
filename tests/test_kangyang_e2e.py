@@ -65,10 +65,12 @@ print("login as alice OK")
 user = f"smoke-{int(time.time())}"
 at.session_state["username"] = user
 at.session_state["display_name"] = "Smoke"
+at.session_state["conv_id"] = "smoke"
 at.session_state["chat_history"] = []
 at.run()
 if at.exception:
     fail(f"switch user run: {[getattr(e, 'value', e) for e in at.exception]}")
+tid = f"{user}:smoke"
 
 # --- 学员画像查询 ---
 at.chat_input[0].set_value("查一下王秀兰的学员画像").run()
@@ -119,7 +121,7 @@ if len(hist) != 6 or hist[-1]["role"] != "assistant":
 
 conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 row = conn.execute(
-    "select type, checkpoint from checkpoints where thread_id=? order by rowid desc limit 1", (user,)
+    "select type, checkpoint from checkpoints where thread_id=? order by rowid desc limit 1", (tid,)
 ).fetchone()
 conn.close()
 ckpt = JsonPlusSerializer().loads_typed((row[0], row[1]))
@@ -128,27 +130,40 @@ if not any(type(m).__name__ == "ToolMessage" and "消息已发送至" in str(m.c
     fail("send_notification ToolMessage not found in saved state")
 print("approve & resume OK (message executed)")
 
-# --- 清空当前对话 ---
-cleared = False
+# --- 新建对话：当前视图清空，旧会话保留为独立记录 ---
+conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+before = 0
+for table in ("checkpoints", "writes"):
+    before += conn.execute(f"select count(*) from {table} where thread_id=?", (tid,)).fetchone()[0]
+conn.close()
+if before == 0:
+    fail("smoke thread has no checkpoints before starting a new conversation")
+
+clicked = False
 for b in at.button:
     if "新建对话" in b.label:
         b.click().run()
-        cleared = True
+        clicked = True
         break
-if not cleared:
+if not clicked:
     fail("new conversation button missing")
 if at.exception:
-    fail(f"clear run: {[getattr(e, 'value', e) for e in at.exception]}")
+    fail(f"new conversation run: {[getattr(e, 'value', e) for e in at.exception]}")
 if at.session_state["chat_history"] != []:
-    fail(f"clear should empty page history, got {at.session_state['chat_history']}")
+    fail(f"new conversation should empty current view, got {at.session_state['chat_history']}")
+new_tid = f"{user}:{at.session_state['conv_id']}"
+if new_tid == tid:
+    fail("new conversation did not start a fresh thread")
 conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-left = 0
+after = 0
 for table in ("checkpoints", "writes"):
-    left += conn.execute(f"select count(*) from {table} where thread_id=?", (user,)).fetchone()[0]
+    after += conn.execute(f"select count(*) from {table} where thread_id=?", (tid,)).fetchone()[0]
 conn.close()
-if left != 0:
-    fail(f"clear should delete thread checkpoints, {left} rows left")
-print("clear conversation OK (page + checkpoint thread cleared)")
+if after == 0:
+    fail("new conversation must keep the previous conversation as a record")
+if not any("查一下王秀兰的学员画像" in b.label for b in at.button):
+    fail(f"conversation record entry missing: {[b.label for b in at.button]}")
+print("new conversation OK (current view cleared, previous conversation kept as record)")
 
 # --- 退出登录 ---
 for b in at.button:
