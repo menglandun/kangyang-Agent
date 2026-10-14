@@ -321,6 +321,8 @@ def login_page():
     st.markdown("学员运营 · 课程交付 · 社群互动 · 转化留存")
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown(LOGIN_HIDE_TOOLBAR_CSS, unsafe_allow_html=True)
+    st.markdown(FLASH_CSS, unsafe_allow_html=True)
+    show_flash()
     with st.form("login_form"):
         username = st.text_input("用户名")
         password = st.text_input("密码", type="password")
@@ -332,7 +334,8 @@ def login_page():
             st.session_state["display_name"] = USERS[username]["name"]
             st.rerun()
         else:
-            st.error("用户名或密码错误")
+            set_flash("用户名或密码错误", "error")
+            st.rerun()
     st.caption("演示账号：alice/alice123（运营总监）、bob/bob123（教研主管）")
 
 def logout():
@@ -615,6 +618,51 @@ button[data-testid="stMainMenuButton"] { display: none; }
 </style>
 """
 
+FLASH_CSS = """
+<style>
+/* 操作提示条：居中显示，约 3 秒后淡出；成功为绿色，异常为红色 */
+.flash-toast {
+    position: fixed;
+    top: 42%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #16a34a;
+    color: #ffffff;
+    padding: 12px 28px;
+    border-radius: 8px;
+    font-size: 1rem;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    z-index: 1000000;
+    pointer-events: none;
+    animation: flash-toast-out 0.8s ease 3s forwards;
+}
+.flash-toast.flash-red { background: #dc2626; }
+@keyframes flash-toast-out {
+    to { opacity: 0; visibility: hidden; }
+}
+</style>
+"""
+
+
+def set_flash(message: str, level: str = "success"):
+    """设置一条瞬时提示（居中提示条）：level 取 success / warning / error。"""
+    st.session_state["flash"] = {"text": message, "level": level}
+
+
+def show_flash():
+    """渲染并消费当前提示条；warning/error 显示为红色。"""
+    flash = st.session_state.pop("flash", None)
+    if not flash:
+        return
+    if isinstance(flash, dict):
+        text = flash.get("text", "")
+        level = flash.get("level", "success")
+    else:
+        text = str(flash)
+        level = "success"
+    css = "flash-toast flash-red" if level in ("warning", "error") else "flash-toast"
+    st.markdown(f'<div class="{css}">{text}</div>', unsafe_allow_html=True)
+
 def main_app():
     st.set_page_config(page_title="银发智脑・兴趣教育智慧中台", page_icon="🤖", layout="wide")
 
@@ -631,37 +679,17 @@ button[data-testid="stMainMenuButton"] { display: none; }
 /* 自定义「我的」菜单：固定在右上角 */
 .st-key-me-menu { position: fixed; top: 0.75rem; right: 1.1rem; z-index: 1000000; width: auto; }
 .st-key-me-menu button { width: auto; }
-/* 会话提示条（新建/切换/重命名）：居中绿色，数秒后淡出 */
-.flash-toast {
-    position: fixed;
-    top: 42%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: #16a34a;
-    color: #ffffff;
-    padding: 12px 28px;
-    border-radius: 8px;
-    font-size: 1rem;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
-    z-index: 1000000;
-    pointer-events: none;
-    animation: flash-toast-out 0.8s ease 3s forwards;
-}
-@keyframes flash-toast-out {
-    to { opacity: 0; visibility: hidden; }
-}
 </style>
 """,
         unsafe_allow_html=True,
     )
+    st.markdown(FLASH_CSS, unsafe_allow_html=True)
 
     display_name = st.session_state["display_name"]
     user_id = st.session_state["username"]
     user_avatar = name_avatar(display_name, "#3B82F6")
 
-    flash = st.session_state.pop("flash", None)
-    if flash:
-        st.markdown(f'<div class="flash-toast">{flash}</div>', unsafe_allow_html=True)
+    show_flash()
 
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown('<div class="kangyang-welcome">欢迎来到兴趣教育智慧家园</div>', unsafe_allow_html=True)
@@ -809,7 +837,8 @@ button[data-testid="stMainMenuButton"] { display: none; }
                         result = app.invoke(Command(resume=True), config)
                     except Exception:
                         logger.exception("审批处理失败（批准）")
-                        st.error("审批处理失败，请刷新页面后重试。")
+                        set_flash("审批处理失败，请刷新页面后重试。", "error")
+                        st.rerun()
                     else:
                         st.session_state.chat_history.append({"role": "assistant", "content": result["messages"][-1].content})
                         st.rerun()
@@ -823,7 +852,8 @@ button[data-testid="stMainMenuButton"] { display: none; }
                         result = app.invoke(Command(resume=False), config)
                     except Exception:
                         logger.exception("审批处理失败（拒绝）")
-                        st.error("审批处理失败，请刷新页面后重试。")
+                        set_flash("审批处理失败，请刷新页面后重试。", "error")
+                        st.rerun()
                     else:
                         st.session_state.chat_history.append({"role": "assistant", "content": result["messages"][-1].content})
                         st.rerun()
@@ -831,9 +861,11 @@ button[data-testid="stMainMenuButton"] { display: none; }
     # 体验课转化助手（第1批）：按需生成，结果保留在会话里
     if st.session_state.pop("yinfa_requested", False):
         if run_conversion_assistant is None:
-            st.error("当前环境缺少 crewai 依赖，无法生成转化方案。")
+            set_flash("当前环境缺少 crewai 依赖，无法生成转化方案。", "error")
+            st.rerun()
         elif not _yinfa_generation_lock.acquire(blocking=False):
-            st.warning("已有生成任务正在进行，请稍后再试。")
+            set_flash("已有生成任务正在进行，请稍后再试。", "warning")
+            st.rerun()
         else:
             try:
                 with st.spinner("银发智脑正在生成今日转化方案（4个智能体依次工作，约需 1-2 分钟）..."):
@@ -841,7 +873,8 @@ button[data-testid="stMainMenuButton"] { display: none; }
             except Exception:
                 logger.exception("转化方案生成失败")
                 st.session_state.pop("yinfa_result", None)
-                st.error("转化方案生成失败，请稍后重试。")
+                set_flash("转化方案生成失败，请稍后重试。", "error")
+                st.rerun()
             finally:
                 _yinfa_generation_lock.release()
 
@@ -857,9 +890,11 @@ button[data-testid="stMainMenuButton"] { display: none; }
     # 爆款选题分析（第2批）：按需生成，结果保留在会话里
     if st.session_state.pop("topic_requested", False):
         if run_topic_analysis is None:
-            st.error("当前环境缺少 crewai 依赖，无法生成选题清单。")
+            set_flash("当前环境缺少 crewai 依赖，无法生成选题清单。", "error")
+            st.rerun()
         elif not _topic_generation_lock.acquire(blocking=False):
-            st.warning("已有生成任务正在进行，请稍后再试。")
+            set_flash("已有生成任务正在进行，请稍后再试。", "warning")
+            st.rerun()
         else:
             try:
                 with st.spinner("银发智脑正在生成本周选题清单（2个智能体依次工作，约需 1-2 分钟）..."):
@@ -867,7 +902,8 @@ button[data-testid="stMainMenuButton"] { display: none; }
             except Exception:
                 logger.exception("选题清单生成失败")
                 st.session_state.pop("topic_result", None)
-                st.error("选题清单生成失败，请稍后重试。")
+                set_flash("选题清单生成失败，请稍后重试。", "error")
+                st.rerun()
             finally:
                 _topic_generation_lock.release()
 
@@ -876,9 +912,11 @@ button[data-testid="stMainMenuButton"] { display: none; }
         if not st.session_state.pop(f"{_feature['key']}_requested", False):
             continue
         if _feature["func"] is None:
-            st.error(f"当前环境缺少 crewai 依赖，无法生成{_feature['title']}。")
+            set_flash(f"当前环境缺少 crewai 依赖，无法生成{_feature['title']}。", "error")
+            st.rerun()
         elif not _tool_generation_locks[_feature["key"]].acquire(blocking=False):
-            st.warning("已有生成任务正在进行，请稍后再试。")
+            set_flash("已有生成任务正在进行，请稍后再试。", "warning")
+            st.rerun()
         else:
             try:
                 with st.spinner(f"银发智脑正在生成{_feature['title']}（约需 1 分钟）..."):
@@ -886,7 +924,8 @@ button[data-testid="stMainMenuButton"] { display: none; }
             except Exception:
                 logger.exception(f"{_feature['title']}生成失败")
                 st.session_state.pop(f"{_feature['key']}_result", None)
-                st.error(f"{_feature['title']}生成失败，请稍后重试。")
+                set_flash(f"{_feature['title']}生成失败，请稍后重试。", "error")
+                st.rerun()
             finally:
                 _tool_generation_locks[_feature["key"]].release()
 
@@ -926,7 +965,8 @@ button[data-testid="stMainMenuButton"] { display: none; }
             except Exception:
                 logger.exception("对话执行失败")
                 st.session_state.chat_history.pop()
-                st.error("对话执行失败，请重试。")
+                set_flash("对话执行失败，请重试。", "error")
+                st.rerun()
             else:
                 snapshot = app.get_state(config)
                 if snapshot.tasks and snapshot.tasks[0].interrupts:
