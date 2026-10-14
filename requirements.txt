@@ -2,3 +2,5 @@ streamlit
 langgraph
 langchain-openai
 langgraph-checkpoint-sqlite
+crewai
+python-dotenv

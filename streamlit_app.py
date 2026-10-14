@@ -19,6 +19,12 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt, Command
 from PIL import Image, ImageDraw, ImageFont
 
+# ============ 银发智脑 · 体验课转化助手（第1批） ============
+try:
+    from yinfa_zhinao import run_conversion_assistant
+except Exception:  # 缺少 crewai 等依赖时不影响主应用启动
+    run_conversion_assistant = None
+
 APP_DIR = Path(__file__).resolve().parent
 KANGYANG_DB = APP_DIR / "kangyang.db"
 CHECKPOINT_DB = APP_DIR / "checkpoints.db"
@@ -532,6 +538,15 @@ def main_app():
                     queue_prompt(f"给{target.strip()}发一条通知，标题：{title.strip()}，内容：{content.strip()}")
                 else:
                     st.caption("请填写接收人、标题和内容")
+        st.divider()
+        st.markdown("**转化助手**")
+        with st.popover("🎓 体验课7天转化助手", disabled=pending, use_container_width=True):
+            st.caption("示例学员：张阿姨（62岁 · 书法体验课 · 第5天）。4个智能体依次生成：学员画像 → 社群话术 → 作业点评 → 转化建议，约需 1-2 分钟。")
+            if run_conversion_assistant is None:
+                st.caption("当前环境未安装 crewai，功能暂不可用")
+            elif st.button("🚀 生成今日转化方案", key="yinfa-run", type="primary", use_container_width=True):
+                st.session_state["yinfa_requested"] = True
+                st.rerun()
         st.markdown('<div class="sidebar-bottom-anchor"></div>', unsafe_allow_html=True)
         if st.button("🚪 退出登录"):
             logout()
@@ -582,6 +597,27 @@ def main_app():
                     else:
                         st.session_state.chat_history.append({"role": "assistant", "content": result["messages"][-1].content})
                         st.rerun()
+
+    # 体验课转化助手（第1批）：按需生成，结果保留在会话里
+    if st.session_state.pop("yinfa_requested", False):
+        if run_conversion_assistant is None:
+            st.error("当前环境缺少 crewai 依赖，无法生成转化方案。")
+        else:
+            with st.spinner("银发智脑正在生成今日转化方案（4个智能体依次工作，约需 1-2 分钟）..."):
+                try:
+                    st.session_state["yinfa_result"] = run_conversion_assistant()
+                except Exception as exc:
+                    st.session_state.pop("yinfa_result", None)
+                    st.error(f"转化方案生成失败：{exc}")
+
+    yinfa_result = st.session_state.get("yinfa_result")
+    if yinfa_result:
+        st.divider()
+        st.subheader("🎓 体验课7天转化助手 · 今日方案")
+        st.caption("示例学员：张阿姨（62岁 · 书法体验课 · 第5天/共7天）")
+        for section_name, section_text in yinfa_result.items():
+            with st.expander(section_name, expanded=(section_name == "转化建议")):
+                st.markdown(section_text or "（暂无输出）")
 
     # 输入（待审批解决前不接受新的普通输入；侧栏快捷功能通过 pending_prompt 注入）
     typed = st.chat_input("例如：王秀兰老人有什么注意事项？今天护工怎么排班？", disabled=pending)
