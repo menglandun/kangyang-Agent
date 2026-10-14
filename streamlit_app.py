@@ -403,6 +403,11 @@ def list_conversation_records(checkpointer, app, user_id: str, limit: int = 8) -
     except Exception:
         logger.exception("会话记录读取失败")
         return []
+    conn = checkpointer.conn
+    try:
+        custom_titles = dict(conn.execute("SELECT thread_id, title FROM conversation_titles").fetchall())
+    except Exception:
+        custom_titles = {}
     records = []
     for record_id, _ in rows:
         try:
@@ -410,7 +415,7 @@ def list_conversation_records(checkpointer, app, user_id: str, limit: int = 8) -
         except Exception:
             continue
         history = history_from_messages(values.get("messages", []))
-        title = next((m["content"] for m in history if m["role"] == "user"), "").strip()
+        title = custom_titles.get(record_id) or next((m["content"] for m in history if m["role"] == "user"), "").strip()
         if not title:
             continue
         title = title.replace("\n", " ")
@@ -418,6 +423,26 @@ def list_conversation_records(checkpointer, app, user_id: str, limit: int = 8) -
         if len(records) >= limit:
             break
     return records
+
+
+def set_conversation_title(checkpointer, thread_id: str, title: str) -> bool:
+    """保存自定义会话标题（覆盖自动生成的首条提问标题）。"""
+    try:
+        conn = checkpointer.conn
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_titles "
+            "(thread_id TEXT PRIMARY KEY, title TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO conversation_titles(thread_id, title) VALUES(?, ?) "
+            "ON CONFLICT(thread_id) DO UPDATE SET title=excluded.title",
+            (thread_id, title),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        logger.exception("会话标题保存失败")
+        return False
 
 
 # 同一用户多标签页并发点“批准/拒绝”时，进程内按 thread_id 串行，并二次校验中断是否仍存在
@@ -606,6 +631,25 @@ button[data-testid="stMainMenuButton"] { display: none; }
 /* 自定义「我的」菜单：固定在右上角 */
 .st-key-me-menu { position: fixed; top: 0.75rem; right: 1.1rem; z-index: 1000000; width: auto; }
 .st-key-me-menu button { width: auto; }
+/* 会话提示条（新建/切换/重命名）：居中绿色，数秒后淡出 */
+.flash-toast {
+    position: fixed;
+    top: 42%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: #16a34a;
+    color: #ffffff;
+    padding: 12px 28px;
+    border-radius: 8px;
+    font-size: 1rem;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    z-index: 1000000;
+    pointer-events: none;
+    animation: flash-toast-out 0.8s ease 3s forwards;
+}
+@keyframes flash-toast-out {
+    to { opacity: 0; visibility: hidden; }
+}
 </style>
 """,
         unsafe_allow_html=True,
@@ -617,7 +661,7 @@ button[data-testid="stMainMenuButton"] { display: none; }
 
     flash = st.session_state.pop("flash", None)
     if flash:
-        st.toast(flash)
+        st.markdown(f'<div class="flash-toast">{flash}</div>', unsafe_allow_html=True)
 
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown('<div class="kangyang-welcome">欢迎来到兴趣教育智慧家园</div>', unsafe_allow_html=True)
@@ -674,8 +718,20 @@ button[data-testid="stMainMenuButton"] { display: none; }
             for record_id, title in records:
                 is_current = record_id == thread_id
                 label = ("🟢 " if is_current else "💬 ") + title
-                if st.button(label, key=f"conv-{record_id}", use_container_width=True, disabled=is_current or pending):
-                    switch_conversation(record_id)
+                col_switch, col_rename = st.columns([5, 1], vertical_alignment="center")
+                with col_switch:
+                    if st.button(label, key=f"conv-{record_id}", use_container_width=True, disabled=is_current or pending):
+                        switch_conversation(record_id)
+                with col_rename:
+                    with st.popover("✏️", help="重命名", use_container_width=True):
+                        new_title = st.text_input("会话标题", value=title, key=f"rename-{record_id}")
+                        if st.button("保存", key=f"rename-save-{record_id}", type="primary", use_container_width=True):
+                            if new_title.strip():
+                                if set_conversation_title(checkpointer, record_id, new_title.strip()):
+                                    st.session_state["flash"] = "标题已更新"
+                                    st.rerun()
+                            else:
+                                st.caption("标题不能为空")
         else:
             st.caption("暂无历史会话（发送消息后自动保存）")
         st.divider()
