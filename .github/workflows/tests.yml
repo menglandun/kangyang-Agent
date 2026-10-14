@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    name: Offline suites (regression / tools / concurrency)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run offline suites
+        run: |
+          python tests/test_regression_review2.py
+          python tests/test_kangyang_offline.py
+          python tests/test_kangyang_residual.py
+
+  network:
+    name: Network suites (manual trigger, real API optional)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Failure injection (invalid key, no secret needed)
+        run: python tests/test_kangyang_failure_injection.py
+      - name: Real API suites (requires DEEPSEEK_API_KEY secret)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -n "$DEEPSEEK_API_KEY" ]; then
+            python tests/test_kangyang_e2e.py
+            python tests/test_kangyang_refresh_history.py
+          else
+            echo "DEEPSEEK_API_KEY not configured; skipping real API suites"
+          fi
