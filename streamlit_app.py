@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import logging
 import threading
+import uuid
 import io
 import math
 from pathlib import Path
@@ -336,7 +337,7 @@ def login_page():
 
 def logout():
     for key in ["authenticated", "username", "display_name", "chat_history",
-                "yinfa_result", "yinfa_requested",
+                "conv_id", "yinfa_result", "yinfa_requested",
                 "topic_result", "topic_requested", "pending_prompt"]:
         st.session_state.pop(key, None)
     for feature in TOOL_FEATURES:
@@ -355,21 +356,18 @@ def get_app(build: str):
     checkpointer = SqliteSaver(conn)
     return graph.compile(checkpointer=checkpointer), checkpointer
 
-def clear_thread(checkpointer, thread_id: str) -> bool:
-    """删除该线程在 checkpointer 里的全部记录；失败时提示并返回 False。"""
-    try:
-        if hasattr(checkpointer, "delete_thread"):
-            checkpointer.delete_thread(thread_id)
-        else:
-            conn = checkpointer.conn
-            with conn:
-                conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
-                conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
-        return True
-    except Exception:
-        logger.exception("清空对话失败")
-        st.error("清空对话失败，请稍后重试。")
-        return False
+def new_conversation():
+    """开始一条新会话：旧会话保留为独立记录，不做删除。"""
+    st.session_state["conv_id"] = uuid.uuid4().hex[:10]
+    st.session_state.pop("chat_history", None)
+    st.rerun()
+
+
+def switch_conversation(record_id: str):
+    """切换到已保存的会话记录。"""
+    st.session_state["conv_id"] = record_id.split(":", 1)[1]
+    st.session_state.pop("chat_history", None)
+    st.rerun()
 
 def history_from_messages(messages) -> list:
     """把 checkpoint 里的消息重建为页面历史（跳过工具消息与工具调用消息）。"""
@@ -380,6 +378,34 @@ def history_from_messages(messages) -> list:
         elif isinstance(msg, AIMessage) and not msg.tool_calls:
             history.append({"role": "assistant", "content": str(msg.content)})
     return history
+
+
+def list_conversation_records(checkpointer, app, user_id: str, limit: int = 8) -> list:
+    """列出该用户名下有内容的会话记录：[(thread_id, 标题)]，按最近使用排序。"""
+    try:
+        rows = checkpointer.conn.execute(
+            "SELECT thread_id, MAX(rowid) AS latest FROM checkpoints "
+            "WHERE thread_id LIKE ? GROUP BY thread_id ORDER BY latest DESC LIMIT ?",
+            (f"{user_id}:%", limit * 3),
+        ).fetchall()
+    except Exception:
+        logger.exception("会话记录读取失败")
+        return []
+    records = []
+    for record_id, _ in rows:
+        try:
+            values = app.get_state({"configurable": {"thread_id": record_id}}).values or {}
+        except Exception:
+            continue
+        history = history_from_messages(values.get("messages", []))
+        title = next((m["content"] for m in history if m["role"] == "user"), "").strip()
+        if not title:
+            continue
+        title = title.replace("\n", " ")
+        records.append((record_id, title[:16] + ("…" if len(title) > 16 else "")))
+        if len(records) >= limit:
+            break
+    return records
 
 
 # 同一用户多标签页并发点“批准/拒绝”时，进程内按 thread_id 串行，并二次校验中断是否仍存在
@@ -594,7 +620,10 @@ button[data-testid="stMainMenuButton"] { display: none; }
     st.caption("工作流：获客 → 转化 → 交付 → 运营 → 留存 ｜ 已上线 9 个智能体工具：转化助手 · 选题分析 · 打卡主题 · 活动策划 · 转介绍 · FAQ · 作业批改 · 续费预警 · 课程大纲")
 
     app, checkpointer = get_app(APP_BUILD)
-    config = {"configurable": {"thread_id": user_id}}
+    if "conv_id" not in st.session_state:
+        st.session_state["conv_id"] = uuid.uuid4().hex[:10]
+    thread_id = f"{user_id}:{st.session_state['conv_id']}"
+    config = {"configurable": {"thread_id": thread_id}}
 
     bot_avatar = bot_avatar_bytes()
 
@@ -621,9 +650,15 @@ button[data-testid="stMainMenuButton"] { display: none; }
         st.markdown('<div class="kangyang-sidebar-title">🤖 银发智脑・兴趣教育智慧中台</div>', unsafe_allow_html=True)
         st.divider()
         if st.button("🆕 新建对话", use_container_width=True):
-            if clear_thread(checkpointer, user_id):
-                st.session_state.pop("chat_history", None)
-                st.rerun()
+            new_conversation()
+        records = list_conversation_records(checkpointer, app, user_id)
+        if records:
+            st.caption("会话记录")
+            for record_id, title in records:
+                is_current = record_id == thread_id
+                label = ("🟢 " if is_current else "💬 ") + title
+                if st.button(label, key=f"conv-{record_id}", use_container_width=True, disabled=is_current or pending):
+                    switch_conversation(record_id)
         st.divider()
         st.markdown("**可用功能**")
         with st.popover("👤 查学员画像", disabled=pending, use_container_width=True):
