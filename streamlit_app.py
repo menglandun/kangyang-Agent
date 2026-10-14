@@ -620,7 +620,7 @@ button[data-testid="stMainMenuButton"] { display: none; }
 
 FLASH_CSS = """
 <style>
-/* 操作提示条：居中显示，约 1.5 秒后淡出；成功为绿色，异常为红色 */
+/* 操作提示条：居中显示，约 1.2 秒后淡出；成功为绿色，异常为红色 */
 .flash-toast {
     position: fixed;
     top: 42%;
@@ -634,7 +634,7 @@ FLASH_CSS = """
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
     z-index: 1000000;
     pointer-events: none;
-    animation: flash-toast-out 0.5s ease 1s forwards;
+    animation: flash-toast-out 0.5s ease 0.7s forwards;
 }
 .flash-toast.flash-red { background: #dc2626; }
 @keyframes flash-toast-out {
