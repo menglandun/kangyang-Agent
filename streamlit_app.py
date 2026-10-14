@@ -359,13 +359,15 @@ def get_app(build: str):
 def new_conversation():
     """开始一条新会话：旧会话保留为独立记录，不做删除。"""
     st.session_state["conv_id"] = uuid.uuid4().hex[:10]
+    st.session_state["flash"] = "已开始新对话"
     st.session_state.pop("chat_history", None)
     st.rerun()
 
 
 def switch_conversation(record_id: str):
-    """切换到已保存的会话记录。"""
-    st.session_state["conv_id"] = record_id.split(":", 1)[1]
+    """切换到已保存的会话记录（兼容旧版 thread_id=user_id 的历史会话）。"""
+    st.session_state["conv_id"] = record_id.split(":", 1)[1] if ":" in record_id else ""
+    st.session_state["flash"] = "已切换会话"
     st.session_state.pop("chat_history", None)
     st.rerun()
 
@@ -385,8 +387,8 @@ def list_conversation_records(checkpointer, app, user_id: str, limit: int = 8) -
     try:
         rows = checkpointer.conn.execute(
             "SELECT thread_id, MAX(rowid) AS latest FROM checkpoints "
-            "WHERE thread_id LIKE ? GROUP BY thread_id ORDER BY latest DESC LIMIT ?",
-            (f"{user_id}:%", limit * 3),
+            "WHERE thread_id = ? OR thread_id LIKE ? GROUP BY thread_id ORDER BY latest DESC LIMIT ?",
+            (user_id, f"{user_id}:%", limit * 3),
         ).fetchall()
     except Exception:
         logger.exception("会话记录读取失败")
@@ -603,6 +605,10 @@ button[data-testid="stMainMenuButton"] { display: none; }
     user_id = st.session_state["username"]
     user_avatar = name_avatar(display_name, "#3B82F6")
 
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        st.toast(flash)
+
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown('<div class="kangyang-welcome">欢迎来到兴趣教育智慧家园</div>', unsafe_allow_html=True)
 
@@ -622,7 +628,8 @@ button[data-testid="stMainMenuButton"] { display: none; }
     app, checkpointer = get_app(APP_BUILD)
     if "conv_id" not in st.session_state:
         st.session_state["conv_id"] = uuid.uuid4().hex[:10]
-    thread_id = f"{user_id}:{st.session_state['conv_id']}"
+    conv_id = st.session_state["conv_id"]
+    thread_id = f"{user_id}:{conv_id}" if conv_id else user_id
     config = {"configurable": {"thread_id": thread_id}}
 
     bot_avatar = bot_avatar_bytes()
@@ -652,13 +659,15 @@ button[data-testid="stMainMenuButton"] { display: none; }
         if st.button("🆕 新建对话", use_container_width=True):
             new_conversation()
         records = list_conversation_records(checkpointer, app, user_id)
+        st.caption("会话记录")
         if records:
-            st.caption("会话记录")
             for record_id, title in records:
                 is_current = record_id == thread_id
                 label = ("🟢 " if is_current else "💬 ") + title
                 if st.button(label, key=f"conv-{record_id}", use_container_width=True, disabled=is_current or pending):
                     switch_conversation(record_id)
+        else:
+            st.caption("暂无历史会话（发送消息后自动保存）")
         st.divider()
         st.markdown("**可用功能**")
         with st.popover("👤 查学员画像", disabled=pending, use_container_width=True):
