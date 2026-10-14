@@ -356,11 +356,20 @@ def get_app(build: str):
     checkpointer = SqliteSaver(conn)
     return graph.compile(checkpointer=checkpointer), checkpointer
 
+def clear_tool_results():
+    """清空本会话窗口里的工具产出（新建/切换会话时调用，保持"一个窗口一套内容"）。"""
+    st.session_state.pop("yinfa_result", None)
+    st.session_state.pop("topic_result", None)
+    for feature in TOOL_FEATURES:
+        st.session_state.pop(f"{feature['key']}_result", None)
+
+
 def new_conversation():
-    """开始一条新会话：旧会话保留为独立记录，不做删除。"""
+    """打开一个全新的会话窗口：旧会话保留为独立记录，窗口内工具产出清空。"""
     st.session_state["conv_id"] = uuid.uuid4().hex[:10]
-    st.session_state["flash"] = "已开始新对话"
+    st.session_state["flash"] = "已新建对话窗口"
     st.session_state.pop("chat_history", None)
+    clear_tool_results()
     st.rerun()
 
 
@@ -369,6 +378,7 @@ def switch_conversation(record_id: str):
     st.session_state["conv_id"] = record_id.split(":", 1)[1] if ":" in record_id else ""
     st.session_state["flash"] = "已切换会话"
     st.session_state.pop("chat_history", None)
+    clear_tool_results()
     st.rerun()
 
 def history_from_messages(messages) -> list:
@@ -870,6 +880,7 @@ button[data-testid="stMainMenuButton"] { display: none; }
                     answer = result["messages"][-1].content
                     st.markdown(answer)
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                    st.rerun()
 
 # ============ 路由 ============
 if "authenticated" not in st.session_state:
