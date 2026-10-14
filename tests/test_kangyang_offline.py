@@ -63,6 +63,16 @@ def test_static():
     assert "yinfa_edu.db" in source and 'sqlite3.connect("yinfa_edu.db")' not in source
     assert 'any(tc["name"] == "send_notification"' in source, "approval gate must check the whole batch"
     assert "route_after_approval" in source and "ToolMessage" in source
+    tools = ns.get("TOOL_FEATURES", [])
+    assert tools and all(t["func"] is not None for t in tools), "运营工具模块导入失败（TOOL_FEATURES 中存在空 func）"
+    assert len({t["key"] for t in tools}) == len(tools), "TOOL_FEATURES 存在重复 key"
+    # 共用 LLM 配置防漂移：各智能体模块必须引用 yinfa_zhinao_llm，不得内联 LLM(...)
+    llm_modules = ("yinfa_zhinao_topic.py", "yinfa_zhinao_checkin.py", "yinfa_zhinao_renewal.py",
+                   "yinfa_zhinao_faq.py", "yinfa_zhinao_event.py", "yinfa_zhinao_curriculum.py",
+                   "yinfa_zhinao_grading.py", "yinfa_zhinao_referral.py")
+    for name in llm_modules:
+        content = open(os.path.join(DIR, name), encoding="utf-8").read()
+        assert "build_deepseek_llm" in content and "LLM(" not in content, f"{name} 未使用共用 LLM 配置"
     print("static checks OK")
 
 
@@ -111,12 +121,36 @@ def test_batch_gate(tmp):
     print("batch approval gate OK (interrupt / reject-pairing / approve-execute)")
 
 
+def test_conversation_records():
+    """多会话记录：每条会话独立成记录，标题取首条提问，按最近使用排序，仅本用户可见。"""
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    saver = ns["SqliteSaver"](conn)
+    app = ns["graph"].compile(checkpointer=saver)
+
+    class PlainLLM:
+        def invoke(self, messages):
+            return AIMessage(content="好的。")
+
+    ns["llm_with_tools"] = PlainLLM()
+    app.invoke({"messages": [("user", "第一段会话的提问")]}, {"configurable": {"thread_id": "alice:c1"}})
+    app.invoke({"messages": [("user", "第二段会话的提问")]}, {"configurable": {"thread_id": "alice:c2"}})
+
+    records = ns["list_conversation_records"](saver, app, "alice")
+    titles = [t for _, t in records]
+    assert titles == ["第二段会话的提问", "第一段会话的提问"], titles
+    assert all(r.startswith("alice:") for r, _ in records), records
+    assert ns["list_conversation_records"](saver, app, "bob") == []
+    conn.close()
+    print("conversation records OK (每会话一条记录，标题取首条提问，按最近排序)")
+
+
 def main():
     test_static()
     test_tools()
     tmp = tempfile.mkdtemp(prefix="yinfa-")
     try:
         test_batch_gate(tmp)
+        test_conversation_records()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("YINFA OFFLINE CHECKS PASSED")
