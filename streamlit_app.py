@@ -2,6 +2,8 @@
 import os
 import sqlite3
 import hmac
+import hashlib
+import logging
 import threading
 import io
 import math
@@ -26,21 +28,35 @@ except Exception:  # 缺少 crewai 等依赖时不影响主应用启动
     run_conversion_assistant = None
 
 APP_DIR = Path(__file__).resolve().parent
-KANGYANG_DB = APP_DIR / "kangyang.db"
+EDU_DB = APP_DIR / "yinfa_edu.db"
 CHECKPOINT_DB = APP_DIR / "checkpoints.db"
 BOT_AVATAR_PATH = APP_DIR / "robot_avatar.png"
 
+
+def _code_fingerprint() -> str:
+    """源码内容指纹：代码/工具更新后自动让 get_app 缓存失效，无需手动改常量。"""
+    digest = hashlib.sha256()
+    for name in ("streamlit_app.py", "yinfa_zhinao.py"):
+        try:
+            digest.update((APP_DIR / name).read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()[:12]
+
+
+APP_BUILD = _code_fingerprint()
+
 # ============ 用户存储 ============
 USERS = {
-    "alice":  {"password": "alice123",  "name": "护理部主管"},
-    "bob":    {"password": "bob123",    "name": "运营经理"},
+    "alice":  {"password": "alice123",  "name": "运营总监"},
+    "bob":    {"password": "bob123",    "name": "教研主管"},
     "admin":  {"password": "admin123",  "name": "管理员"},
 }
 
 # ============ 配置 ============
 if os.getenv("LANGSMITH_API_KEY"):
     os.environ["LANGSMITH_TRACING"] = "true"
-    os.environ["LANGSMITH_PROJECT"] = "kangyang-agent"
+    os.environ["LANGSMITH_PROJECT"] = "yinfa-zhinao"
 
 api_key = os.getenv("DEEPSEEK_API_KEY")
 if not api_key:
@@ -53,64 +69,57 @@ llm = ChatOpenAI(
     temperature=0.1,
 )
 
+logger = logging.getLogger("yinfa_zhinao")
+
 # ============ 业务数据库初始化 ============
 def init_business_db():
-    """初始化康养社区业务数据库（首次运行自动建表）。"""
-    conn = sqlite3.connect(str(KANGYANG_DB))
+    """初始化银发兴趣教育业务数据库（首次运行自动建表）。"""
+    conn = sqlite3.connect(str(EDU_DB), timeout=10)
     c = conn.cursor()
 
-    c.execute("""CREATE TABLE IF NOT EXISTS residents(
-        id TEXT PRIMARY KEY, name TEXT, age INT, room TEXT,
-        health_level TEXT, caregiver TEXT, notes TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS students(
+        id TEXT PRIMARY KEY, name TEXT, age INT, city TEXT,
+        course TEXT, tag TEXT, note TEXT)""")
 
-    c.execute("""CREATE TABLE IF NOT EXISTS staff(
-        id TEXT PRIMARY KEY, name TEXT, role TEXT, phone TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS checkin_plans(
+        date TEXT, theme TEXT, course TEXT, tip TEXT)""")
 
-    c.execute("""CREATE TABLE IF NOT EXISTS schedule(
-        date TEXT, staff_id TEXT, shift TEXT, area TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS events(
+        date TEXT, time TEXT, name TEXT, location TEXT, audience TEXT)""")
 
-    c.execute("""CREATE TABLE IF NOT EXISTS activities(
-        date TEXT, time TEXT, name TEXT, location TEXT, participants TEXT)""")
+    # 唯一约束：防止多实例并发首启重复写入当天种子数据
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_checkin_plans_date ON checkin_plans(date)")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_day ON events(date, time, name)")
 
-    # 种子数据：老人/员工只在首次建库时写入
-    c.execute("SELECT COUNT(*) FROM residents")
+    # 种子数据：学员只在首次建库时写入
+    c.execute("SELECT COUNT(*) FROM students")
     if c.fetchone()[0] == 0:
-        residents = [
-            ("R001", "王秀兰", 82, "301", "自理", "李护工", "血压偏高，需每日监测"),
-            ("R002", "张建国", 78, "302", "半护理", "陈护工", "糖尿病，饮食需控糖"),
-            ("R003", "刘桂芳", 85, "305", "全护理", "李护工", "行动不便，需协助翻身"),
-            ("R004", "赵德明", 76, "401", "自理", "王护工", "冠心病，随身携带硝酸甘油"),
+        students = [
+            ("S001", "王秀兰", 68, "北京", "手机摄影", "高意向", "连续打卡7天，问过进阶班价格"),
+            ("S002", "张建国", 72, "上海", "书法", "观望", "上过两次体验课，还没报正课"),
+            ("S003", "刘桂芳", 65, "杭州", "声乐", "高意向", "已购基础课，作业完成度高"),
+            ("S004", "赵德明", 70, "广州", "手机摄影", "沉默", "两周没打开课程，需要唤醒"),
+            ("S005", "孙丽华", 63, "成都", "短视频剪辑", "观望", "担心手机剪辑太难上手"),
         ]
-        c.executemany("INSERT INTO residents VALUES(?,?,?,?,?,?,?)", residents)
+        c.executemany("INSERT OR IGNORE INTO students VALUES(?,?,?,?,?,?,?)", students)
 
-        staff = [
-            ("S001", "李护工", "护理员", "138****1001"),
-            ("S002", "陈护工", "护理员", "138****1002"),
-            ("S003", "王护工", "护理员", "138****1003"),
-            ("S004", "刘护士", "护士", "138****1004"),
-        ]
-        c.executemany("INSERT INTO staff VALUES(?,?,?,?)", staff)
-
-    # 排班/活动按天补齐：每天首次运行写入当天数据，避免隔天查询为空
+    # 打卡主题/课程活动按天补齐：每天首次运行写入当天数据，避免隔天查询为空
     today = date.today().isoformat()
-    c.execute("SELECT COUNT(*) FROM schedule WHERE date=?", (today,))
+    c.execute("SELECT COUNT(*) FROM checkin_plans WHERE date=?", (today,))
     if c.fetchone()[0] == 0:
-        schedule = [
-            (today, "S001", "白班 8:00-16:00", "3楼"),
-            (today, "S002", "白班 8:00-16:00", "3楼"),
-            (today, "S003", "夜班 16:00-24:00", "4楼"),
-            (today, "S004", "白班 8:00-16:00", "医务室"),
+        checkin_plans = [
+            (today, "窗边的光", "手机摄影", "拍一张家里窗边的光影，发到社群完成今日打卡"),
         ]
-        c.executemany("INSERT INTO schedule VALUES(?,?,?,?)", schedule)
+        c.executemany("INSERT OR IGNORE INTO checkin_plans VALUES(?,?,?,?)", checkin_plans)
 
-    c.execute("SELECT COUNT(*) FROM activities WHERE date=?", (today,))
+    c.execute("SELECT COUNT(*) FROM events WHERE date=?", (today,))
     if c.fetchone()[0] == 0:
-        activities = [
-            (today, "09:30", "晨间太极", "一楼花园", "自理老人约20人"),
-            (today, "14:00", "手工书法", "二楼活动室", "王秀兰、赵德明"),
-            (today, "15:30", "健康讲座：糖尿病饮食", "一楼多功能厅", "全体员工+老人自愿参加"),
+        events = [
+            (today, "14:00", "直播课：手机摄影第3课（构图进阶）", "直播间A", "手机摄影班学员"),
+            (today, "19:00", "社群活动：书法作业集中点评", "学员群", "书法班学员"),
+            (today, "20:00", "体验课：声乐入门公开课", "直播间B", "新学员"),
         ]
-        c.executemany("INSERT INTO activities VALUES(?,?,?,?,?)", activities)
+        c.executemany("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?)", events)
 
     conn.commit()
     conn.close()
@@ -119,69 +128,63 @@ init_business_db()
 
 # ============ 业务工具 ============
 @tool
-def query_resident(resident_name: str) -> str:
-    """查询入住老人的档案信息，包括年龄、房间号、健康等级、责任护工和注意事项。"""
-    conn = sqlite3.connect(str(KANGYANG_DB))
+def query_student(student_name: str) -> str:
+    """查询学员画像档案：年龄、城市、所学课程、意向标签和运营备注。"""
+    conn = sqlite3.connect(str(EDU_DB), timeout=10)
     c = conn.cursor()
-    c.execute("SELECT * FROM residents WHERE name LIKE ?", (f"%{resident_name}%",))
+    c.execute("SELECT * FROM students WHERE name LIKE ?", (f"%{student_name}%",))
     rows = c.fetchall()
     conn.close()
     if not rows:
-        return f"未找到名为 {resident_name} 的老人，可尝试查询全部入住老人"
+        return f"未找到名为 {student_name} 的学员，可尝试查询全部学员"
     result = []
     for r in rows:
-        result.append(f"档案号 {r[0]}：{r[1]}，{r[2]}岁，{r[3]}房，健康等级「{r[4]}」，责任护工：{r[5]}。注意：{r[6]}")
+        result.append(f"档案号 {r[0]}：{r[1]}，{r[2]}岁，来自{r[3]}，课程「{r[4]}」，意向标签：{r[5]}。运营备注：{r[6]}")
     return "\n".join(result)
 
 @tool
-def list_all_residents() -> str:
-    """列出所有入住老人的基本信息。"""
-    conn = sqlite3.connect(str(KANGYANG_DB))
+def list_students() -> str:
+    """列出全部学员及其意向标签。"""
+    conn = sqlite3.connect(str(EDU_DB), timeout=10)
     c = conn.cursor()
-    c.execute("SELECT name, room, health_level, caregiver FROM residents")
+    c.execute("SELECT name, course, tag FROM students")
     rows = c.fetchall()
     conn.close()
-    return "当前入住老人：\n" + "\n".join([f"- {r[0]}（{r[1]}，{r[2]}，护工：{r[3]}）" for r in rows])
+    return "当前学员：\n" + "\n".join([f"- {r[0]}（{r[1]} · {r[2]}）" for r in rows])
 
 @tool
-def query_schedule(staff_name: str = "") -> str:
-    """查询今日护工排班。可传入护工姓名筛选，不传则返回全部排班。"""
-    conn = sqlite3.connect(str(KANGYANG_DB))
+def query_checkin_topic() -> str:
+    """查询今日打卡主题与玩法提示。"""
+    conn = sqlite3.connect(str(EDU_DB), timeout=10)
     c = conn.cursor()
     today = date.today().isoformat()
-    if staff_name:
-        c.execute("""SELECT s.name, s.role, sc.shift, sc.area
-                     FROM schedule sc JOIN staff s ON sc.staff_id = s.id
-                     WHERE sc.date=? AND s.name LIKE ?""", (today, f"%{staff_name}%"))
-    else:
-        c.execute("""SELECT s.name, s.role, sc.shift, sc.area
-                     FROM schedule sc JOIN staff s ON sc.staff_id = s.id
-                     WHERE sc.date=?""", (today,))
+    c.execute("SELECT theme, course, tip FROM checkin_plans WHERE date=?", (today,))
     rows = c.fetchall()
     conn.close()
     if not rows:
-        return "今日无排班记录"
-    return f"今日排班（{today}）：\n" + "\n".join([f"- {r[0]}（{r[1]}）：{r[2]}，负责{r[3]}" for r in rows])
+        return "今日暂无打卡主题"
+    theme, course, tip = rows[0]
+    return f"今日打卡主题（{today}）：{theme}（{course}）\n玩法提示：{tip}"
 
 @tool
-def list_activities() -> str:
-    """查询今日活动安排。"""
-    conn = sqlite3.connect(str(KANGYANG_DB))
+def list_today_events() -> str:
+    """查询今日课程与社群活动安排。"""
+    conn = sqlite3.connect(str(EDU_DB), timeout=10)
     c = conn.cursor()
     today = date.today().isoformat()
-    c.execute("SELECT time, name, location, participants FROM activities WHERE date=?", (today,))
+    c.execute("SELECT time, name, location, audience FROM events WHERE date=?", (today,))
     rows = c.fetchall()
     conn.close()
     if not rows:
-        return "今日无活动安排"
-    return f"今日活动（{today}）：\n" + "\n".join([f"- {r[0]} {r[1]} @ {r[2]}（{r[3]}）" for r in rows])
+        return "今日暂无课程或活动安排"
+    return f"今日课程/活动（{today}）：\n" + "\n".join([f"- {r[0]} {r[1]} @ {r[2]}（{r[3]}）" for r in rows])
 
 @tool
 def send_notification(target: str, title: str, content: str) -> str:
-    """发送通知给护工或家属（需主管审批后才真正发送）。target 可以是护工姓名或家属电话。"""
-    return f"通知已发送至 {target}：「{title}」— {content}"
+    """给学员或社群发消息（需主管审批后才真正发送）。target 可以是学员姓名或群名。"""
+    return f"消息已发送至 {target}：「{title}」— {content}"
 
-tools = [query_resident, list_all_residents, query_schedule, list_activities, send_notification]
+tools = [query_student, list_students, query_checkin_topic, list_today_events, send_notification]
 llm_with_tools = llm.bind_tools(tools)
 
 # ============ 图 ============
@@ -192,11 +195,11 @@ def call_llm(state: AgentState):
     return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
 def human_approval(state: AgentState):
-    """中断点：发送通知前暂停；interrupt() 会把状态存进 checkpointer。"""
+    """中断点：发送消息前暂停；interrupt() 会把状态存进 checkpointer。"""
     tool_calls = state["messages"][-1].tool_calls
     notice_call = next(tc for tc in tool_calls if tc["name"] == "send_notification")
     approved = interrupt({
-        "action": "需要审批发送通知",
+        "action": "需要审批发消息",
         "tool": notice_call["name"],
         "args": notice_call["args"],
         "tool_calls": [{"name": tc["name"], "args": tc["args"]} for tc in tool_calls],
@@ -257,7 +260,7 @@ def verify_user(username: str, password: str) -> bool:
 def login_page():
     st.set_page_config(page_title="登录 - 银发智脑・兴趣教育智慧中台", page_icon="🔐")
     st.title("🔐 银发智脑・兴趣教育智慧中台")
-    st.markdown("护理部日常问答 · 档案查询 · 排班活动 · 通知审批")
+    st.markdown("学员运营 · 课程交付 · 社群互动 · 转化留存")
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown(LOGIN_HIDE_TOOLBAR_CSS, unsafe_allow_html=True)
     with st.form("login_form"):
@@ -272,16 +275,20 @@ def login_page():
             st.rerun()
         else:
             st.error("用户名或密码错误")
-    st.caption("演示账号：alice/alice123（护理部主管）、bob/bob123（运营经理）")
+    st.caption("演示账号：alice/alice123（运营总监）、bob/bob123（教研主管）")
 
 def logout():
-    for key in ["authenticated", "username", "display_name", "chat_history"]:
+    for key in ["authenticated", "username", "display_name", "chat_history",
+                "yinfa_result", "yinfa_requested", "pending_prompt"]:
         st.session_state.pop(key, None)
     st.rerun()
 
 # ============ 主界面 ============
 @st.cache_resource
-def get_app():
+def get_app(build: str):
+    # build 参与缓存键：代码/工具更新时改 APP_BUILD 即可让缓存失效
+    # （注意：Streamlit 只把函数体内实际使用到的参数计入缓存键）
+    _ = build
     # timeout：多进程/多实例共享同一 SQLite 时最多等 10 秒，避免瞬时 database is locked
     conn = sqlite3.connect(str(CHECKPOINT_DB), check_same_thread=False, timeout=10)
     checkpointer = SqliteSaver(conn)
@@ -298,8 +305,9 @@ def clear_thread(checkpointer, thread_id: str) -> bool:
                 conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
                 conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
         return True
-    except Exception as exc:
-        st.error(f"清空对话失败：{exc}")
+    except Exception:
+        logger.exception("清空对话失败")
+        st.error("清空对话失败，请稍后重试。")
         return False
 
 def history_from_messages(messages) -> list:
@@ -321,6 +329,10 @@ _resume_locks_guard = threading.Lock()
 def resume_lock(thread_id: str) -> threading.Lock:
     with _resume_locks_guard:
         return _resume_locks.setdefault(thread_id, threading.Lock())
+
+
+# 同一时刻只允许一个转化方案生成任务，避免多用户并发调用 crewai 时资源竞争
+_yinfa_generation_lock = threading.Lock()
 
 
 AVATAR_FONT_CANDIDATES = [
@@ -386,11 +398,11 @@ def bot_avatar_bytes() -> bytes:
 
 
 @st.cache_data(show_spinner=False)
-def resident_names() -> list:
-    """入住老人名单（用于侧栏“查老人档案”快捷入口）。"""
+def student_names() -> list:
+    """学员名单（用于侧栏“查学员画像”快捷入口）。"""
     try:
-        conn = sqlite3.connect(str(KANGYANG_DB))
-        rows = conn.execute("SELECT name FROM residents ORDER BY id").fetchall()
+        conn = sqlite3.connect(str(EDU_DB), timeout=10)
+        rows = conn.execute("SELECT name FROM students ORDER BY id").fetchall()
         conn.close()
         return [r[0] for r in rows]
     except Exception:
@@ -496,8 +508,9 @@ def main_app():
     st.markdown(APP_CSS, unsafe_allow_html=True)
     st.markdown('<div class="kangyang-welcome">欢迎来到兴趣教育家园</div>', unsafe_allow_html=True)
     st.caption(f"当前登录：{display_name}（@{user_id}）")
+    st.caption("工作流：获客 → 转化 → 交付 → 运营 → 留存 ｜ 第1批已上线：体验课7天转化助手（学员画像 · 社群话术 · 作业点评 · 转化建议）")
 
-    app, checkpointer = get_app()
+    app, checkpointer = get_app(APP_BUILD)
     config = {"configurable": {"thread_id": user_id}}
 
     user_avatar = name_avatar(display_name, "#3B82F6")
@@ -519,23 +532,23 @@ def main_app():
                 st.rerun()
         st.divider()
         st.markdown("**可用功能**")
-        with st.popover("👤 查老人档案", disabled=pending, use_container_width=True):
-            for name in resident_names():
-                if st.button(name, key=f"resident-{name}"):
-                    queue_prompt(f"查询{name}老人的档案")
-        if st.button("📋 列全部入住老人", use_container_width=True, disabled=pending):
-            queue_prompt("列出全部入住老人")
-        if st.button("📅 查护工排班", use_container_width=True, disabled=pending):
-            queue_prompt("今天护工怎么排班？")
-        if st.button("🎯 查今日活动", use_container_width=True, disabled=pending):
-            queue_prompt("今天有哪些活动？")
-        with st.popover("📢 发通知（需审批）", disabled=pending, use_container_width=True):
-            target = st.text_input("接收人", placeholder="如：李护工", key="notice-target")
-            title = st.text_input("标题", placeholder="如：测血压提醒", key="notice-title")
-            content = st.text_area("内容", placeholder="如：明早8点301房王秀兰需测血压", key="notice-content")
-            if st.button("提交通知", key="notice-submit"):
+        with st.popover("👤 查学员画像", disabled=pending, use_container_width=True):
+            for name in student_names():
+                if st.button(name, key=f"student-{name}"):
+                    queue_prompt(f"查询学员{name}的画像")
+        if st.button("📋 列全部学员", use_container_width=True, disabled=pending):
+            queue_prompt("列出全部学员和意向标签")
+        if st.button("📅 今日打卡主题", use_container_width=True, disabled=pending):
+            queue_prompt("今天的打卡主题是什么？")
+        if st.button("🎯 今日课程安排", use_container_width=True, disabled=pending):
+            queue_prompt("今天有哪些课程和活动安排？")
+        with st.popover("📢 发消息（需审批）", disabled=pending, use_container_width=True):
+            target = st.text_input("接收人/群", placeholder="如：王秀兰 / 书法班群", key="notice-target")
+            title = st.text_input("标题", placeholder="如：打卡提醒", key="notice-title")
+            content = st.text_area("内容", placeholder="如：今晚 19:00 有社群答疑，记得参加", key="notice-content")
+            if st.button("提交消息", key="notice-submit"):
                 if target.strip() and title.strip() and content.strip():
-                    queue_prompt(f"给{target.strip()}发一条通知，标题：{title.strip()}，内容：{content.strip()}")
+                    queue_prompt(f"给{target.strip()}发一条消息，标题：{title.strip()}，内容：{content.strip()}")
                 else:
                     st.caption("请填写接收人、标题和内容")
         st.divider()
@@ -579,8 +592,9 @@ def main_app():
                         st.rerun()  # 已被其他会话处理，避免重复 resume
                     try:
                         result = app.invoke(Command(resume=True), config)
-                    except Exception as exc:
-                        st.error(f"审批处理失败：{exc}")
+                    except Exception:
+                        logger.exception("审批处理失败（批准）")
+                        st.error("审批处理失败，请刷新页面后重试。")
                     else:
                         st.session_state.chat_history.append({"role": "assistant", "content": result["messages"][-1].content})
                         st.rerun()
@@ -592,8 +606,9 @@ def main_app():
                         st.rerun()  # 已被其他会话处理，避免重复 resume
                     try:
                         result = app.invoke(Command(resume=False), config)
-                    except Exception as exc:
-                        st.error(f"审批处理失败：{exc}")
+                    except Exception:
+                        logger.exception("审批处理失败（拒绝）")
+                        st.error("审批处理失败，请刷新页面后重试。")
                     else:
                         st.session_state.chat_history.append({"role": "assistant", "content": result["messages"][-1].content})
                         st.rerun()
@@ -602,13 +617,18 @@ def main_app():
     if st.session_state.pop("yinfa_requested", False):
         if run_conversion_assistant is None:
             st.error("当前环境缺少 crewai 依赖，无法生成转化方案。")
+        elif not _yinfa_generation_lock.acquire(blocking=False):
+            st.warning("已有生成任务正在进行，请稍后再试。")
         else:
-            with st.spinner("银发智脑正在生成今日转化方案（4个智能体依次工作，约需 1-2 分钟）..."):
-                try:
+            try:
+                with st.spinner("银发智脑正在生成今日转化方案（4个智能体依次工作，约需 1-2 分钟）..."):
                     st.session_state["yinfa_result"] = run_conversion_assistant()
-                except Exception as exc:
-                    st.session_state.pop("yinfa_result", None)
-                    st.error(f"转化方案生成失败：{exc}")
+            except Exception:
+                logger.exception("转化方案生成失败")
+                st.session_state.pop("yinfa_result", None)
+                st.error("转化方案生成失败，请稍后重试。")
+            finally:
+                _yinfa_generation_lock.release()
 
     yinfa_result = st.session_state.get("yinfa_result")
     if yinfa_result:
@@ -620,7 +640,7 @@ def main_app():
                 st.markdown(section_text or "（暂无输出）")
 
     # 输入（待审批解决前不接受新的普通输入；侧栏快捷功能通过 pending_prompt 注入）
-    typed = st.chat_input("例如：王秀兰老人有什么注意事项？今天护工怎么排班？", disabled=pending)
+    typed = st.chat_input("例如：查一下王秀兰的学员画像？今天的打卡主题是什么？", disabled=pending)
     queued = st.session_state.pop("pending_prompt", None) if not pending else None
     prompt = typed or queued
     if prompt:
@@ -632,9 +652,10 @@ def main_app():
             st.markdown('<div class="chat-sender-name">大聪明智能助手</div>', unsafe_allow_html=True)
             try:
                 result = app.invoke({"messages": [("user", prompt)]}, config)
-            except Exception as exc:
+            except Exception:
+                logger.exception("对话执行失败")
                 st.session_state.chat_history.pop()
-                st.error(f"对话执行失败，请重试：{exc}")
+                st.error("对话执行失败，请重试。")
             else:
                 snapshot = app.get_state(config)
                 if snapshot.tasks and snapshot.tasks[0].interrupts:

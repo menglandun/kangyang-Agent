@@ -1,6 +1,6 @@
-streamlit
-langgraph
-langchain-openai
-langgraph-checkpoint-sqlite
-crewai
-python-dotenv
+streamlit~=1.65.0
+langgraph~=1.2.14
+langchain-openai~=1.6.7
+langgraph-checkpoint-sqlite~=3.1.2
+crewai~=1.15.27
+python-dotenv~=1.2.4

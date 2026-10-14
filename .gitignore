@@ -1,10 +1,7 @@
 # 本地运行数据（不要提交）
-checkpoints.db
-checkpoints.db-shm
-checkpoints.db-wal
-kangyang.db
-kangyang.db-shm
-kangyang.db-wal
+*.db
+*.db-shm
+*.db-wal
 
 # Python 缓存
 __pycache__/
