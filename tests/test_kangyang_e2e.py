@@ -39,15 +39,17 @@ at.text_input[1].set_value("wrong-password")
 at.button[0].click().run()
 if at.exception:
     fail(f"bad login run: {[getattr(e, 'value', e) for e in at.exception]}")
-if not any("用户名或密码错误" in e.value for e in at.error):
-    fail(f"wrong-password error missing: {[e.value for e in at.error]}")
+bad_login_texts = [e.value for e in at.error] + [m.value for m in at.markdown]
+if not any("用户名或密码错误" in v for v in bad_login_texts):
+    fail(f"wrong-password error missing: {bad_login_texts[:6]}")
 
 at.text_input[1].set_value("密码123")
 at.button[0].click().run()
 if at.exception:
     fail(f"non-ascii password run: {[getattr(e, 'value', e) for e in at.exception]}")
-if not any("用户名或密码错误" in e.value for e in at.error):
-    fail(f"non-ascii password should be rejected gracefully: {[e.value for e in at.error]}")
+non_ascii_texts = [e.value for e in at.error] + [m.value for m in at.markdown]
+if not any("用户名或密码错误" in v for v in non_ascii_texts):
+    fail(f"non-ascii password should be rejected gracefully: {non_ascii_texts[:6]}")
 print("password checks OK (wrong + non-ascii, no crash)")
 
 # --- 正确登录 ---
@@ -129,6 +131,10 @@ msgs = ckpt.get("channel_values", {}).get("messages", [])
 if not any(type(m).__name__ == "ToolMessage" and "消息已发送至" in str(m.content) for m in msgs):
     fail("send_notification ToolMessage not found in saved state")
 print("approve & resume OK (message executed)")
+
+# 首条消息发出后，会话记录应立即出现（发完消息会自动 rerun 刷新侧栏）
+if not any("查一下王秀兰的学员画像" in b.label for b in at.button):
+    fail(f"conversation record should appear right after the first message: {[b.label for b in at.button][:8]}")
 
 # --- 新建对话：当前视图清空，旧会话保留为独立记录 ---
 conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)

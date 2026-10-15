@@ -134,14 +134,18 @@ def test_conversation_records():
     ns["llm_with_tools"] = PlainLLM()
     app.invoke({"messages": [("user", "第一段会话的提问")]}, {"configurable": {"thread_id": "alice:c1"}})
     app.invoke({"messages": [("user", "第二段会话的提问")]}, {"configurable": {"thread_id": "alice:c2"}})
+    app.invoke({"messages": [("user", "旧版历史会话的提问")]}, {"configurable": {"thread_id": "alice"}})
 
     records = ns["list_conversation_records"](saver, app, "alice")
     titles = [t for _, t in records]
-    assert titles == ["第二段会话的提问", "第一段会话的提问"], titles
-    assert all(r.startswith("alice:") for r, _ in records), records
+    assert titles == ["旧版历史会话的提问", "第二段会话的提问", "第一段会话的提问"], titles
+    assert [r for r, _ in records][-1].startswith("alice:"), records
+    assert ns["set_conversation_title"](saver, "alice:c1", "自定义标题一")
+    renamed = dict(ns["list_conversation_records"](saver, app, "alice"))
+    assert renamed["alice:c1"] == "自定义标题一", renamed
     assert ns["list_conversation_records"](saver, app, "bob") == []
     conn.close()
-    print("conversation records OK (每会话一条记录，标题取首条提问，按最近排序)")
+    print("conversation records OK (多会话 + 旧版线程兼容，标题取首条提问，按最近排序)")
 
 
 def main():
